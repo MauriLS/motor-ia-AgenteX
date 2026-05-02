@@ -60,3 +60,38 @@ async def process_chat(req: ChatRequest):
         
     messages_payload.append({"role": "user", "content": req.pregunta})
 
+    # 3. Preparar la petición a DeepSeek
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "deepseek-chat",
+        "messages": messages_payload,
+        "temperature": 0.3, # Baja creatividad, alta precisión analítica
+        "max_tokens": 1500
+    }
+
+    # 4. Llamada asíncrona a la red neuronal
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            response = await client.post(DEEPSEEK_API_URL, headers=headers, json=payload)
+            response.raise_for_status() # Lanza error si el status HTTP no es 200 OK
+            data = response.json()
+
+            # Extraer solo el texto útil de la respuesta
+            ia_response = data["choices"][0]["message"]["content"].strip()
+
+            return {
+                "success": True,
+                "user_id": req.user_id,
+                "respuesta": ia_response
+            }
+
+    except httpx.HTTPStatusError as e:
+        print(f"Error en HTTPStatus: {e.response.text}")
+        raise HTTPException(status_code=502, detail=f"Error en DeepSeek API: {e.response.status_code}")
+    except Exception as e:
+        print(f"Error interno: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno del motor IA: {str(e)}")
