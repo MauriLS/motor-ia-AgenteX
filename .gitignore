@@ -1,3 +1,27 @@
-echo "venv/" > .gitignore
-echo "__pycache__/" >> .gitignore
-echo ".env" >> .gitignore
+# Entorno virtual
+venv/
+.env/
+
+# Variables de entorno
+.env
+.env.*
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# IDEs / editores
+.vscode/
+.idea/
+
+# Archivos temporales
+*.tmp
+*.swp
