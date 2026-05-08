@@ -7,8 +7,7 @@ import os
 import json
 from dotenv import load_dotenv
 
-# 1. IMPORTAMOS TUS HERRAMIENTAS CORPORATIVAS
-from tools import tools_manifest, consultar_producto_tienda
+from tools import tools_manifest, consultar_inventario_zxtreme
 
 # =========================
 # CONFIGURACIÓN
@@ -49,8 +48,9 @@ async def process_chat(req: ChatRequest):
         "role": "system",
         "content": (
             "Eres el Agente X, encargado de la Bodega. Eres directo y analítico. "
-            "Tienes acceso a consultar productos en tiempo real. SIEMPRE usa tus herramientas "
-            "si el usuario pregunta por un producto específico, precio o detalle de catálogo."
+            "Tienes acceso a consultar productos en tiempo real. "
+            "REGLA CRÍTICA: NUNCA confíes en la información de productos que esté en el historial de la conversación. "
+            "Los precios y descripciones cambian constantemente. SIEMPRE debes ejecutar tu herramienta para verificar el estado actual del producto, incluso si el usuario te pregunta por el mismo producto dos veces seguidas."
         )
     }
 
@@ -59,7 +59,18 @@ async def process_chat(req: ChatRequest):
     if req.history:
         messages_payload.extend([msg.model_dump() for msg in req.history])
         
-    messages_payload.append({"role": "user", "content": req.pregunta})
+    # Insertamos la pregunta real del usuario
+    inyeccion_estricta = (
+        "\n\n[DIRECTIVA DE SISTEMA OBLIGATORIA: Ignora el historial para consultar productos. "
+        "Tienes estrictamente prohibido adivinar. SIEMPRE debes ejecutar tu herramienta "
+        "'consultar_inventario_zxtreme' AHORA MISMO para buscar el producto que acabo de mencionar.]"
+    )
+    
+    # Insertamos la pregunta real + nuestra inyección oculta
+    messages_payload.append({
+        "role": "user", 
+        "content": req.pregunta + inyeccion_estricta
+    })
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -98,12 +109,13 @@ async def process_chat(req: ChatRequest):
                     function_name = tool_call["function"]["name"]
                     arguments = json.loads(tool_call["function"]["arguments"])
 
-                    if function_name == "consultar_producto_tienda":
-                        product_id = arguments.get("product_id")
-                        print(f"🔥 ORQUESTADOR: Ejecutando endpoint para el Producto {product_id}...")
+                    if function_name == "consultar_inventario_zxtreme":
+                        id_articulo = arguments.get("id_articulo")
+                        print(f"🔥 ORQUESTADOR ZXTREME: Consultando ERP para Artículo {id_articulo}...")
                         
                         # Ejecutamos la función física (La Pala)
-                        tool_result = await consultar_producto_tienda(product_id)
+                        tool_result = await consultar_inventario_zxtreme(id_articulo)
+                        print(f"📦 DATO CRUDO DEL ERP: {tool_result}")
 
                         # Inyectamos los datos reales de vuelta a la memoria
                         messages_payload.append({
