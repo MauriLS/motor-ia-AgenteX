@@ -1,45 +1,66 @@
 # motor-ia-AgenteX/tools.py
 import httpx
+import time
 
-# 1. EL MANIFIESTO (El contrato estricto para DeepSeek)
+# 1. EL MANIFIESTO ESTRATÉGICO
 tools_manifest = [
     {
         "type": "function",
         "function": {
-            "name": "consultar_producto_tienda",
-            "description": "Obtiene información en tiempo real de un producto específico en la tienda por su ID (incluye precio, categoría, descripción). Usa esta herramienta SIEMPRE que el usuario pregunte por detalles de un producto específico.",
+            "name": "consultar_inventario_zxtreme",
+            "description": "Obtiene información en tiempo real del ERP corporativo sobre un artículo (toritos, bicicletas, repuestos) usando su ID interno. EJECUTA ESTO SIEMPRE para dar precios, stock o disponibilidad web.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "product_id": {
+                    "id_articulo": {
                         "type": "integer",
-                        "description": "El ID numérico del producto a consultar (ejemplo: 1, 5, 10)."
+                        "description": "El ID numérico exacto del artículo a consultar."
                     }
                 },
-                "required": ["product_id"]
+                "required": ["id_articulo"]
             }
         }
     }
 ]
 
-# 2. LA FUNCIÓN FÍSICA (La ejecución real)
-async def consultar_producto_tienda(product_id: int) -> str:
+# 2. LA FUNCIÓN FÍSICA (Tu Endpoint Real)
+# Reemplaza SOLO la función física en tools.py
+
+async def consultar_inventario_zxtreme(id_articulo: int) -> str:
     """
-    Va a la API externa y devuelve un string con los datos en crudo para la IA.
+    Consume el endpoint masivo de Zxtreme y filtra en memoria de Python.
+    (Workaround arquitectónico para ERP sin rutas individuales).
     """
-    url = f"https://fakestoreapi.com/products/{product_id}"
+    # Apuntamos a la raíz. Traerá TODO el inventario.
+    url = f"http://92.113.39.10:3001/articulos?_timestamp={int(time.time())}" 
+    
     try:
-        async with httpx.AsyncClient() as client:
+        # Aumentamos el timeout a 30 segundos previendo una carga pesada de datos
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(url)
             
-            if response.status_code == 404:
-                return f"Error: No existe ningún producto con el ID {product_id}."
             if response.status_code != 200:
-                return f"Error de conexión con la tienda (Status {response.status_code})."
+                return f"Fallo de enlace con el ERP Zxtreme (Status {response.status_code})."
                 
-            data = response.json()
-            # Devolvemos un string estructurado para que la IA lo entienda fácil
-            return f"Producto encontrado: {data['title']}. Precio: ${data['price']}. Categoría: {data['category']}. Descripción: {data['description']}."
+            articulos_array = response.json()
+            
+            # Buscamos el ID exacto dentro de la matriz masiva que entregó tu ERP
+            # Usamos next() para detener la búsqueda en el instante en que lo encuentre
+            articulo_encontrado = next((item for item in articulos_array if item.get('id') == id_articulo), None)
+            
+            if not articulo_encontrado:
+                return f"Error: No existe el artículo ID {id_articulo} en la base de datos del ERP."
+            
+            # Mapeo estricto a tu esquema SQL (MyISAM)
+            sku = articulo_encontrado.get('sku', 'Sin SKU')
+            nombre = articulo_encontrado.get('articulo', 'Artículo Desconocido')
+            precio = articulo_encontrado.get('precio_tienda', 0)
+            stock = articulo_encontrado.get('stock_min', 0)
+            estado = "Activo" if articulo_encontrado.get('estado') else "Inactivo/Descontinuado"
+            web = "Publicado en Zxtreme.cl" if articulo_encontrado.get('web') else "Venta solo interna"
+            descripcion = articulo_encontrado.get('descripcion', 'Sin descripción')
+            
+            return f"DATOS DEL ERP: Artículo: {nombre}. SKU: {sku}. Precio Tienda: ${precio} CLP. Stock Mínimo Registrado: {stock}. Estado Comercial: {estado}. Estado Web: {web}. Descripción Técnica: {descripcion}."
             
     except Exception as e:
-        return f"Error interno al consultar la base de datos de productos: {str(e)}"
+        return f"Error crítico al consultar el servidor 92.113.39.10: {str(e)}"
