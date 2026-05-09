@@ -1,13 +1,14 @@
 # motor-ia-AgenteX/main.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List, Literal
+from typing import Optional, List, Dict, Any
+from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import os
 import json
 from dotenv import load_dotenv
 
-from tools import tools_manifest, consultar_inventario_zxtreme
+from tools import tools_manifest, consultar_inventario_erp
 
 # =========================
 # CONFIGURACIÓN
@@ -16,69 +17,53 @@ load_dotenv()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions" 
 
-if not DEEPSEEK_API_KEY:
-    print("ADVERTENCIA: DEEPSEEK_API_KEY no está definida en el archivo .env")
+app = FastAPI(title="Agente X - Motor IA (Stateless Worker)")
 
-app = FastAPI(title="Agente X - Motor IA (Intermediario)")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # =========================
-# MODELOS DE DATOS
+# EL NUEVO CONTRATO MULTI-TENANT (SaaS)
 # =========================
-class Message(BaseModel):
-    role: Literal["user", "assistant", "system", "tool"]
-    content: str
-
 class ChatRequest(BaseModel):
     user_id: int
     pregunta: str
-    history: Optional[List[Message]] = []
+    history: Optional[List[Dict[str, Any]]] = []
+    # 🚩 NUEVOS CAMPOS OBLIGATORIOS PARA ABSTRACCIÓN
+    system_prompt: str 
+    allowed_tools: List[str] 
+    tenant_config: Dict[str, Any] # Ej: {"erp_url": "http://92.113.39.10:3001/articulos"}
 
 # =========================
-# LÓGICA CENTRAL (El Orquestador)
+# LÓGICA CENTRAL
 # =========================
 @app.post("/api/ia/process")
 async def process_chat(req: ChatRequest):
     if not req.pregunta.strip():
-        raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía")
+        raise HTTPException(status_code=400, detail="Pregunta vacía")
 
-    if not DEEPSEEK_API_KEY:
-         raise HTTPException(status_code=500, detail="Error de servidor: API Key no configurada.")
-
-    system_message = {
-        "role": "system",
-        "content": (
-            "Eres el Agente X, encargado de la Bodega. Eres directo y analítico. "
-            "Tienes acceso a consultar productos en tiempo real. "
-            "REGLA CRÍTICA: NUNCA confíes en la información de productos que esté en el historial de la conversación. "
-            "Los precios y descripciones cambian constantemente. SIEMPRE debes ejecutar tu herramienta para verificar el estado actual del producto, incluso si el usuario te pregunta por el mismo producto dos veces seguidas."
-        )
-    }
-
-    messages_payload = [system_message]
+    # 1. Inyectamos el prompt dinámico que viene de Node.js
+    messages_payload = [{"role": "system", "content": req.system_prompt}]
     
     if req.history:
-        messages_payload.extend([msg.model_dump() for msg in req.history])
+        messages_payload.extend(req.history)
         
-    # Insertamos la pregunta real del usuario
-    inyeccion_estricta = (
-        "\n\n[DIRECTIVA DE SISTEMA OBLIGATORIA: Ignora el historial para consultar productos. "
-        "Tienes estrictamente prohibido adivinar. SIEMPRE debes ejecutar tu herramienta "
-        "'consultar_inventario_zxtreme' AHORA MISMO para buscar el producto que acabo de mencionar.]"
-    )
-    
-    # Insertamos la pregunta real + nuestra inyección oculta
-    messages_payload.append({
-        "role": "user", 
-        "content": req.pregunta + inyeccion_estricta
-    })
+    messages_payload.append({"role": "user", "content": req.pregunta})
+
+    # 2. Filtramos el catálogo de herramientas según lo que Node.js permita para este cliente
+    active_tools = [tool for tool in tools_manifest if tool["function"]["name"] in req.allowed_tools]
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # 2. EL BUCLE DE RAZONAMIENTO (Tool Calling Loop)
-    MAX_ITERATIONS = 3 # Cortafuegos B2B para evitar ciclos infinitos
+    MAX_ITERATIONS = 3
     iteration = 0
 
     while iteration < MAX_ITERATIONS:
@@ -87,8 +72,11 @@ async def process_chat(req: ChatRequest):
             "messages": messages_payload,
             "temperature": 0.3,
             "max_tokens": 1500,
-            "tools": tools_manifest # Inyectamos el catálogo de herramientas
         }
+        
+        # Solo inyectamos "tools" si la lista no está vacía
+        if active_tools:
+            payload["tools"] = active_tools
 
         try:
             async with httpx.AsyncClient(timeout=45.0) as client:
@@ -99,25 +87,23 @@ async def process_chat(req: ChatRequest):
             ia_message = data["choices"][0]["message"]
             finish_reason = data["choices"][0]["finish_reason"]
 
-            # CASO A: La IA decidió que NECESITA consultar la base de datos
             if finish_reason == "tool_calls":
-                # 1. Guardamos el intento de la IA en la memoria local
                 messages_payload.append(ia_message) 
 
-                # 2. Ejecutamos cada herramienta que haya solicitado
                 for tool_call in ia_message.get("tool_calls", []):
                     function_name = tool_call["function"]["name"]
                     arguments = json.loads(tool_call["function"]["arguments"])
 
-                    if function_name == "consultar_inventario_zxtreme":
+                    # 🚩 ENRUTADOR DINÁMICO DE HERRAMIENTAS
+                    if function_name == "consultar_inventario_erp":
                         id_articulo = arguments.get("id_articulo")
-                        print(f"🔥 ORQUESTADOR ZXTREME: Consultando ERP para Artículo {id_articulo}...")
+                        # Extraemos la IP del ERP de la configuración del tenant enviada por Node
+                        erp_url = req.tenant_config.get("erp_url") 
                         
-                        # Ejecutamos la función física (La Pala)
-                        tool_result = await consultar_inventario_zxtreme(id_articulo)
-                        print(f"📦 DATO CRUDO DEL ERP: {tool_result}")
-
-                        # Inyectamos los datos reales de vuelta a la memoria
+                        print(f"🔥 Ejecutando ERP Tenant -> URL: {erp_url} | Art: {id_articulo}")
+                        
+                        tool_result = await consultar_inventario_erp(id_articulo, erp_url)
+                        
                         messages_payload.append({
                             "role": "tool",
                             "tool_call_id": tool_call["id"],
@@ -126,9 +112,8 @@ async def process_chat(req: ChatRequest):
                         })
                 
                 iteration += 1
-                continue # Volvemos al inicio del 'while' para que la IA lea los datos
+                continue 
 
-            # CASO B: La IA ya tiene los datos o no necesitó herramientas. Entrega texto final.
             else:
                 return {
                     "success": True,
@@ -136,12 +121,7 @@ async def process_chat(req: ChatRequest):
                     "respuesta": ia_message.get("content", "").strip()
                 }
 
-        except httpx.HTTPStatusError as e:
-            print(f"Error HTTP: {e.response.text}")
-            raise HTTPException(status_code=502, detail=f"Error API: {e.response.status_code}")
         except Exception as e:
-            print(f"Error interno: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Fallo del motor: {str(e)}")
 
-    # Si se rompe el bucle de iteraciones (Cortafuegos)
-    raise HTTPException(status_code=500, detail="El agente entró en un bucle infinito de herramientas.")
+    raise HTTPException(status_code=500, detail="Bucle infinito de herramientas.")
