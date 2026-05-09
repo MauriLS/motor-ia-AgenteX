@@ -1,35 +1,43 @@
+# motor-ia-AgenteX/main.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List, Literal
+from typing import Optional, List, Dict, Any
+from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import os
+import json
 from dotenv import load_dotenv
+
+from tools import tools_manifest, consultar_inventario_erp
 
 # =========================
 # CONFIGURACIÓN
 # =========================
 load_dotenv()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-# Usamos el endpoint estándar compatible con OpenAI de DeepSeek
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions" 
 
-if not DEEPSEEK_API_KEY:
-    print("ADVERTENCIA: DEEPSEEK_API_KEY no está definida en el archivo .env")
+app = FastAPI(title="Agente X - Motor IA (Stateless Worker)")
 
-# Instancia de la aplicación (Esta es la variable 'app' que Uvicorn estaba buscando)
-app = FastAPI(title="Agente X - Motor IA (Intermediario)")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # =========================
-# MODELOS DE DATOS (Seguridad B2B)
+# EL NUEVO CONTRATO MULTI-TENANT (SaaS)
 # =========================
-class Message(BaseModel):
-    role: Literal["user", "assistant", "system"]
-    content: str
-
 class ChatRequest(BaseModel):
     user_id: int
     pregunta: str
-    history: Optional[List[Message]] = []
+    history: Optional[List[Dict[str, Any]]] = []
+    # 🚩 NUEVOS CAMPOS OBLIGATORIOS PARA ABSTRACCIÓN
+    system_prompt: str 
+    allowed_tools: List[str] 
+    tenant_config: Dict[str, Any] # Ej: {"erp_url": "http://92.113.39.10:3001/articulos"}
 
 # =========================
 # LÓGICA CENTRAL
@@ -37,61 +45,83 @@ class ChatRequest(BaseModel):
 @app.post("/api/ia/process")
 async def process_chat(req: ChatRequest):
     if not req.pregunta.strip():
-        raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía")
+        raise HTTPException(status_code=400, detail="Pregunta vacía")
 
-    if not DEEPSEEK_API_KEY:
-         raise HTTPException(status_code=500, detail="Error de servidor: API Key de DeepSeek no configurada.")
-
-    # 1. Definir la identidad del Agente
-    system_message = {
-        "role": "system",
-        "content": (
-            "Eres el Agente X, un asesor corporativo y analista de datos de alto nivel. "
-            "Responde de forma directa, racional y sin adornos. "
-            "Si no sabes algo, dilo inmediatamente. No inventes información."
-        )
-    }
-
-    # 2. Construir el historial de mensajes
-    messages_payload = [system_message]
+    # 1. Inyectamos el prompt dinámico que viene de Node.js
+    messages_payload = [{"role": "system", "content": req.system_prompt}]
     
     if req.history:
-        messages_payload.extend([msg.model_dump() for msg in req.history])
+        messages_payload.extend(req.history)
         
     messages_payload.append({"role": "user", "content": req.pregunta})
 
-    # 3. Preparar la petición a DeepSeek
+    # 2. Filtramos el catálogo de herramientas según lo que Node.js permita para este cliente
+    active_tools = [tool for tool in tools_manifest if tool["function"]["name"] in req.allowed_tools]
+
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    payload = {
-        "model": "deepseek-chat",
-        "messages": messages_payload,
-        "temperature": 0.3, # Baja creatividad, alta precisión analítica
-        "max_tokens": 1500
-    }
+    MAX_ITERATIONS = 3
+    iteration = 0
 
-    # 4. Llamada asíncrona a la red neuronal
-    try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            response = await client.post(DEEPSEEK_API_URL, headers=headers, json=payload)
-            response.raise_for_status() # Lanza error si el status HTTP no es 200 OK
-            data = response.json()
+    while iteration < MAX_ITERATIONS:
+        payload = {
+            "model": "deepseek-chat",
+            "messages": messages_payload,
+            "temperature": 0.3,
+            "max_tokens": 1500,
+        }
+        
+        # Solo inyectamos "tools" si la lista no está vacía
+        if active_tools:
+            payload["tools"] = active_tools
 
-            # Extraer solo el texto útil de la respuesta
-            ia_response = data["choices"][0]["message"]["content"].strip()
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                response = await client.post(DEEPSEEK_API_URL, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
 
-            return {
-                "success": True,
-                "user_id": req.user_id,
-                "respuesta": ia_response
-            }
+            ia_message = data["choices"][0]["message"]
+            finish_reason = data["choices"][0]["finish_reason"]
 
-    except httpx.HTTPStatusError as e:
-        print(f"Error en HTTPStatus: {e.response.text}")
-        raise HTTPException(status_code=502, detail=f"Error en DeepSeek API: {e.response.status_code}")
-    except Exception as e:
-        print(f"Error interno: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error interno del motor IA: {str(e)}")
+            if finish_reason == "tool_calls":
+                messages_payload.append(ia_message) 
+
+                for tool_call in ia_message.get("tool_calls", []):
+                    function_name = tool_call["function"]["name"]
+                    arguments = json.loads(tool_call["function"]["arguments"])
+
+                    # 🚩 ENRUTADOR DINÁMICO DE HERRAMIENTAS
+                    if function_name == "consultar_inventario_erp":
+                        id_articulo = arguments.get("id_articulo")
+                        # Extraemos la IP del ERP de la configuración del tenant enviada por Node
+                        erp_url = req.tenant_config.get("erp_url") 
+                        
+                        print(f"🔥 Ejecutando ERP Tenant -> URL: {erp_url} | Art: {id_articulo}")
+                        
+                        tool_result = await consultar_inventario_erp(id_articulo, erp_url)
+                        
+                        messages_payload.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "name": function_name,
+                            "content": tool_result
+                        })
+                
+                iteration += 1
+                continue 
+
+            else:
+                return {
+                    "success": True,
+                    "user_id": req.user_id,
+                    "respuesta": ia_message.get("content", "").strip()
+                }
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Fallo del motor: {str(e)}")
+
+    raise HTTPException(status_code=500, detail="Bucle infinito de herramientas.")
