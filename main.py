@@ -34,10 +34,10 @@ class ChatRequest(BaseModel):
     user_id: int
     pregunta: str
     history: Optional[List[Dict[str, Any]]] = []
-    # 🚩 NUEVOS CAMPOS OBLIGATORIOS PARA ABSTRACCIÓN
     system_prompt: str 
     allowed_tools: List[str] 
-    tenant_config: Dict[str, Any] # Ej: {"erp_url": "http://92.113.39.10:3001/articulos"}
+    tenant_config: Dict[str, Any] 
+    temperature: float = 0.3 # 🚩 Inyectado: Control cognitivo dinámico
 
 # =========================
 # LÓGICA CENTRAL
@@ -70,7 +70,7 @@ async def process_chat(req: ChatRequest):
         payload = {
             "model": "deepseek-chat",
             "messages": messages_payload,
-            "temperature": 0.3,
+            "temperature": req.temperature, # 🚩 Inyectado: Usamos el valor de la BD, no hardcodeado
             "max_tokens": 1500,
         }
         
@@ -97,7 +97,6 @@ async def process_chat(req: ChatRequest):
                     # 🚩 ENRUTADOR DINÁMICO DE HERRAMIENTAS
                     if function_name == "consultar_inventario_erp":
                         id_articulo = arguments.get("id_articulo")
-                        # Extraemos la IP del ERP de la configuración del tenant enviada por Node
                         erp_url = req.tenant_config.get("erp_url") 
                         
                         print(f"🔥 Ejecutando ERP Tenant -> URL: {erp_url} | Art: {id_articulo}")
@@ -115,10 +114,17 @@ async def process_chat(req: ChatRequest):
                 continue 
 
             else:
+                # 🚩 Inyectado: Captura de métricas financieras de la API de DeepSeek
+                usage = data.get("usage", {})
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+
                 return {
                     "success": True,
                     "user_id": req.user_id,
-                    "respuesta": ia_message.get("content", "").strip()
+                    "respuesta": ia_message.get("content", "").strip(),
+                    "prompt_tokens": prompt_tokens,         # Viaja a Node.js
+                    "completion_tokens": completion_tokens  # Viaja a Node.js
                 }
 
         except Exception as e:
