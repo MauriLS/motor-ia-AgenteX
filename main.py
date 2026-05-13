@@ -28,34 +28,35 @@ app.add_middleware(
 )
 
 # =========================
-# EL NUEVO CONTRATO MULTI-TENANT (SaaS)
+# EL CONTRATO ESTRICTO NODE <-> PYTHON
 # =========================
 class ChatRequest(BaseModel):
-    user_id: int
-    pregunta: str
-    history: Optional[List[Dict[str, Any]]] = []
+    tenant_id: int
+    user_message: str
     system_prompt: str 
-    allowed_tools: List[str] 
-    tenant_config: Dict[str, Any] 
-    temperature: float = 0.3 # 🚩 Inyectado: Control cognitivo dinámico
+    temperature: float = 0.3
+    erp_url: Optional[str] = None
+    erp_mapping: Optional[Dict[str, str]] = None # 🚩 Aceptamos el diccionario
+    allowed_tools: Optional[List[str]] = []
+    history: Optional[List[Dict[str, Any]]] = []
 
 # =========================
 # LÓGICA CENTRAL
 # =========================
 @app.post("/api/ia/process")
 async def process_chat(req: ChatRequest):
-    if not req.pregunta.strip():
-        raise HTTPException(status_code=400, detail="Pregunta vacía")
+    if not req.user_message.strip():
+        raise HTTPException(status_code=400, detail="El mensaje del usuario está vacío.")
 
-    # 1. Inyectamos el prompt dinámico que viene de Node.js
+    # 1. Inyectamos el cerebro del Agente B2B
     messages_payload = [{"role": "system", "content": req.system_prompt}]
     
     if req.history:
         messages_payload.extend(req.history)
         
-    messages_payload.append({"role": "user", "content": req.pregunta})
+    messages_payload.append({"role": "user", "content": req.user_message})
 
-    # 2. Filtramos el catálogo de herramientas según lo que Node.js permita para este cliente
+    # 2. Filtrado de Catálogo de Herramientas
     active_tools = [tool for tool in tools_manifest if tool["function"]["name"] in req.allowed_tools]
 
     headers = {
@@ -70,11 +71,10 @@ async def process_chat(req: ChatRequest):
         payload = {
             "model": "deepseek-chat",
             "messages": messages_payload,
-            "temperature": req.temperature, # 🚩 Inyectado: Usamos el valor de la BD, no hardcodeado
+            "temperature": req.temperature,
             "max_tokens": 1500,
         }
         
-        # Solo inyectamos "tools" si la lista no está vacía
         if active_tools:
             payload["tools"] = active_tools
 
@@ -96,12 +96,21 @@ async def process_chat(req: ChatRequest):
 
                     # 🚩 ENRUTADOR DINÁMICO DE HERRAMIENTAS
                     if function_name == "consultar_inventario_erp":
-                        id_articulo = arguments.get("id_articulo")
-                        erp_url = req.tenant_config.get("erp_url") 
+                        # Extraemos los NUEVOS parámetros que generó la IA
+                        t_filtro = arguments.get("tipo_filtro")
+                        v_busqueda = arguments.get("valor_busqueda")
+                        c_refinada = arguments.get("categoria_refinada")
                         
-                        print(f"🔥 Ejecutando ERP Tenant -> URL: {erp_url} | Art: {id_articulo}")
+                        print(f"🔥 ERP Tenant -> URL: {req.erp_url} | Filtro: {t_filtro} | Valor: {v_busqueda} | Cat: {c_refinada}")
                         
-                        tool_result = await consultar_inventario_erp(id_articulo, erp_url)
+                        # Ejecutamos la función inyectando el mapeo de este cliente específico
+                        tool_result = await consultar_inventario_erp(
+                            tipo_filtro=t_filtro, 
+                            valor_busqueda=v_busqueda, 
+                            erp_url=req.erp_url, 
+                            erp_mapping=req.erp_mapping, 
+                            categoria_refinada=c_refinada
+                        )
                         
                         messages_payload.append({
                             "role": "tool",
@@ -114,20 +123,16 @@ async def process_chat(req: ChatRequest):
                 continue 
 
             else:
-                # 🚩 Inyectado: Captura de métricas financieras de la API de DeepSeek
                 usage = data.get("usage", {})
-                prompt_tokens = usage.get("prompt_tokens", 0)
-                completion_tokens = usage.get("completion_tokens", 0)
-
                 return {
                     "success": True,
-                    "user_id": req.user_id,
-                    "respuesta": ia_message.get("content", "").strip(),
-                    "prompt_tokens": prompt_tokens,         # Viaja a Node.js
-                    "completion_tokens": completion_tokens  # Viaja a Node.js
+                    "tenant_id": req.tenant_id,
+                    "reply": ia_message.get("content", "").strip(),
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0)
                 }
 
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Fallo del motor: {str(e)}")
 
-    raise HTTPException(status_code=500, detail="Bucle infinito de herramientas.")
+    raise HTTPException(status_code=500, detail="Bucle infinito de herramientas detectado. Abortando.")
