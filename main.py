@@ -13,7 +13,7 @@ from tools import tools_manifest, consultar_inventario_erp
 load_dotenv()
 
 DEEPSEEK_API_KEY  = os.getenv("DEEPSEEK_API_KEY")
-DEEPSEEK_API_URL  = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_API_URL  = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1/chat/completions")
 INTERNAL_SECRET   = os.getenv("INTERNAL_SECRET", "")
 
 app = FastAPI(title="Agente X - Motor IA (Stateless Worker)")
