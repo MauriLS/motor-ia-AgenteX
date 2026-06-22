@@ -26,4 +26,8 @@ Thumbs.db
 *.tmp
 *.swp
 
+# Coverage de tests (se regenera con pytest)
+.coverage
+htmlcov/
+
 CONTEXTO_TESTING_AGENTEX.md
